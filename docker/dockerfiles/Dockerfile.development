@@ -1,0 +1,48 @@
+# Rally MCP Server - Development Dockerfile
+# Optimized for development with hot reload and debugging
+
+FROM node:18-alpine
+
+# Install development dependencies
+RUN apk add --no-cache \
+    git \
+    bash \
+    curl
+
+# Create app user
+RUN addgroup -g 1001 -S rallymcp && \
+    adduser -S rallymcp -u 1001
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install all dependencies (including dev dependencies)
+RUN npm ci
+
+# Create necessary directories and set permissions
+RUN mkdir -p /app/logs /app/dist && \
+    chown -R rallymcp:rallymcp /app
+
+# Switch to non-root user
+USER rallymcp
+
+# Expose ports for SSE transport and debugging
+EXPOSE 3000 9229
+
+# Environment variables for development
+ENV NODE_ENV=development
+ENV RALLY_TRANSPORT=sse
+ENV RALLY_SERVER_PORT=3000
+ENV RALLY_SERVER_HOST=0.0.0.0
+ENV ENABLE_DEBUG=true
+
+# Health check for development
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# Default command with hot reload
+CMD ["npm", "run", "dev:sse"]

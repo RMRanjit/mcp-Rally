@@ -1,0 +1,81 @@
+# Rally MCP Server - Development Docker Compose
+# Development setup with hot reload and debugging
+
+version: '3.8'
+
+services:
+  rally-mcp-dev:
+    build:
+      context: ../..
+      dockerfile: docker/dockerfiles/Dockerfile.development
+    container_name: rally-mcp-dev
+    restart: unless-stopped
+
+    # Environment configuration for development
+    environment:
+      - NODE_ENV=development
+      - RALLY_TRANSPORT=sse
+      - RALLY_SERVER_PORT=3000
+      - RALLY_SERVER_HOST=0.0.0.0
+      - ENABLE_DEBUG=true
+      - ENABLE_REQUEST_LOGGING=true
+      - LOG_LEVEL=debug
+
+    # Load environment from development file
+    env_file:
+      - ../../.env.development
+
+    # Port mapping (including debug port)
+    ports:
+      - "3000:3000"   # SSE transport
+      - "9229:9229"   # Node.js debug port
+
+    # Volume mounts for hot reload
+    volumes:
+      - ../../src:/app/src:ro
+      - ../../package.json:/app/package.json:ro
+      - ../../package-lock.json:/app/package-lock.json:ro
+      - ../../tsconfig.json:/app/tsconfig.json:ro
+      - rally-dev-node-modules:/app/node_modules
+      - rally-dev-logs:/app/logs
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+    # Development-friendly settings
+    stdin_open: true
+    tty: true
+
+    # Networking
+    networks:
+      - rally-dev-network
+
+  # Optional: Rally API mock server for development
+  rally-mock:
+    image: wiremock/wiremock:latest
+    container_name: rally-mock-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../wiremock:/home/wiremock
+    command: ["--global-response-templating", "--verbose"]
+    networks:
+      - rally-dev-network
+    profiles:
+      - mock
+
+networks:
+  rally-dev-network:
+    driver: bridge
+    name: rally-mcp-dev-network
+
+volumes:
+  rally-dev-node-modules:
+    driver: local
+  rally-dev-logs:
+    driver: local

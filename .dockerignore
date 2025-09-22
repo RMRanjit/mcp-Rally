@@ -1,0 +1,94 @@
+# Rally MCP Server - Docker Build Ignore
+# Optimize Docker build by excluding unnecessary files
+
+# Dependencies
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# Build output (will be generated during build)
+dist
+build
+
+# Environment files (use Docker secrets instead)
+.env
+.env.*
+!.env.example
+
+# Development files
+.eslintcache
+*.tsbuildinfo
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation (not needed in runtime)
+docs/
+*.md
+!README.md
+
+# Test files
+tests/
+**/*.test.ts
+**/*.test.js
+**/*.spec.ts
+**/*.spec.js
+jest.config.js
+
+# Development configuration
+.prettierrc
+.prettierignore
+.eslintrc.js
+# tsconfig.json - needed for build
+
+# Claude Desktop specific
+.claude/
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Logs
+logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+
+# Package manager files (will be copied separately)
+# package-lock.json - needed for npm ci
+yarn.lock

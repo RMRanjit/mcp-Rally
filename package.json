@@ -51,7 +51,17 @@
     "prod:start": "node dist/index.js",
     "prod:start:stdio": "RALLY_TRANSPORT=stdio node dist/index.js",
     "prod:start:sse": "RALLY_TRANSPORT=sse node dist/index.js",
-    "docs:generate": "typedoc src/index.ts --out docs"
+    "docs:generate": "typedoc src/index.ts --out docs",
+    "docker:dev": "./scripts/docker-dev.sh",
+    "docker:dev:up": "./scripts/docker-dev.sh up",
+    "docker:dev:down": "./scripts/docker-dev.sh down",
+    "docker:dev:logs": "./scripts/docker-dev.sh logs",
+    "docker:prod": "./scripts/docker-prod.sh",
+    "docker:prod:up": "./scripts/docker-prod.sh up",
+    "docker:prod:down": "./scripts/docker-prod.sh down",
+    "docker:prod:logs": "./scripts/docker-prod.sh logs",
+    "docker:build:dev": "docker build -f docker/dockerfiles/Dockerfile.development -t rally-mcp:dev .",
+    "docker:build:prod": "docker build -f docker/dockerfiles/Dockerfile.production -t rally-mcp:prod ."
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
