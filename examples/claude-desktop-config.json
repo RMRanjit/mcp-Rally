@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "rally": {
+      "command": "node",
+      "args": ["/Users/nullpointer/Code/MCP/mcp-rally/scripts/start-for-claude.js"],
+      "env": {
+        "NODE_ENV": "development"
+      }
+    }
+  }
+}

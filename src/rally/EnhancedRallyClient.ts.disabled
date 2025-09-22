@@ -1,0 +1,489 @@
+/**
+ * Enhanced Rally Client with Comprehensive Resilience
+ *
+ * Integrates with the full resilience orchestrator for enterprise-grade
+ * error handling, retry logic, circuit breakers, and fallback strategies.
+ *
+ * Requirements: req-011 (API Key Authentication), req-012 (Secure Communication), req-020 (Error Handling)
+ */
+
+import { AxiosInstance, AxiosError } from 'axios';
+import { IRallyClient, ISecurityManager, IPerformanceManager, RallyResponse, RallyQuery } from '../core/interfaces';
+import { ResilienceOrchestrator, OperationConfig } from '../resilience/ResilienceOrchestrator';
+import { Logger } from '../logging/Logger';
+import { MCPError, MCPErrorType } from '../errors/ErrorTypes';
+import { FallbackStrategy } from '../resilience/FallbackManager';
+
+export class EnhancedRallyClient implements IRallyClient {
+  private baseUrl: string;
+  private httpClient: AxiosInstance;
+  private isAuthenticated = false;
+  private resilienceOrchestrator: ResilienceOrchestrator;
+  private logger: Logger;
+
+  constructor(
+    private securityManager: ISecurityManager,
+    private performanceManager: IPerformanceManager,
+    resilienceOrchestrator: ResilienceOrchestrator,
+    logger: Logger
+  ) {
+    this.baseUrl = this.securityManager.getRallyBaseUrl();
+    this.httpClient = this.performanceManager.httpClient;
+    this.resilienceOrchestrator = resilienceOrchestrator;
+    this.logger = logger.withCorrelation({
+      component: 'enhanced-rally-client'
+    });
+
+    // Configure base URL
+    this.httpClient.defaults.baseURL = `${this.baseUrl}/slm/webservice/v2.0`;
+
+    // Set default headers
+    this.httpClient.defaults.headers.common = {
+      ...this.httpClient.defaults.headers.common,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    };
+
+    this.setupOperationConfigurations();
+  }
+
+  /**
+   * Setup resilience configurations for different operations
+   */
+  private setupOperationConfigurations(): void {
+    // Authentication operation - fast fail, no retries for invalid credentials
+    this.resilienceOrchestrator.registerOperation('authenticate', {
+      operation: 'authenticate',
+      enableRetry: true,
+      enableCircuitBreaker: true,
+      enableFallback: false,
+      retryConfig: {
+        maxRetries: 1, // Only one retry for auth
+        baseDelayMs: 1000,
+        backoffMultiplier: 1
+      },
+      timeoutMs: 10000 // 10 second timeout for auth
+    });
+
+    // Create operations - retry with backoff, circuit breaker, fallback to cached data
+    this.resilienceOrchestrator.registerOperation('create', {
+      operation: 'create',
+      enableRetry: true,
+      enableCircuitBreaker: true,
+      enableFallback: true,
+      retryConfig: {
+        maxRetries: 3,
+        baseDelayMs: 1000,
+        backoffMultiplier: 2
+      },
+      fallbackStrategy: FallbackStrategy.RETRY_LATER,
+      timeoutMs: 30000
+    });
+
+    // Read operations - aggressive retry, fallback to cache
+    this.resilienceOrchestrator.registerOperation('get', {
+      operation: 'get',
+      enableRetry: true,
+      enableCircuitBreaker: true,
+      enableFallback: true,
+      retryConfig: {
+        maxRetries: 5,
+        baseDelayMs: 500,
+        backoffMultiplier: 1.5
+      },
+      fallbackStrategy: FallbackStrategy.CACHE,
+      timeoutMs: 15000
+    });
+
+    // Update operations - moderate retry, fallback to retry later
+    this.resilienceOrchestrator.registerOperation('update', {
+      operation: 'update',
+      enableRetry: true,
+      enableCircuitBreaker: true,
+      enableFallback: true,
+      retryConfig: {
+        maxRetries: 3,
+        baseDelayMs: 1000,
+        backoffMultiplier: 2
+      },
+      fallbackStrategy: FallbackStrategy.RETRY_LATER,
+      timeoutMs: 30000
+    });
+
+    // Query operations - aggressive retry, cache fallback
+    this.resilienceOrchestrator.registerOperation('query', {
+      operation: 'query',
+      enableRetry: true,
+      enableCircuitBreaker: true,
+      enableFallback: true,
+      retryConfig: {
+        maxRetries: 5,
+        baseDelayMs: 500,
+        backoffMultiplier: 1.5
+      },
+      fallbackStrategy: FallbackStrategy.CACHE,
+      timeoutMs: 20000
+    });
+  }
+
+  /**
+   * Authenticate with Rally API using resilience orchestrator
+   */
+  async authenticate(apiKey: string): Promise<void> {
+    const result = await this.resilienceOrchestrator.executeOperation(
+      'authenticate',
+      async () => {
+        // Validate the API key format first
+        await this.securityManager.validateApiKey(apiKey);
+
+        // Update headers with the provided API key and integration info
+        if (apiKey) {
+          const authHeaders = this.securityManager.getAuthHeaders(apiKey);
+          Object.assign(this.httpClient.defaults.headers.common, authHeaders);
+        }
+
+        // Test authentication by making a simple API call to workspaces
+        const response = await this.httpClient.get('/workspace', {
+          timeout: 10000,
+          params: {
+            fetch: 'Name',
+            pagesize: '1'
+          }
+        });
+
+        if (response.status === 200 && response.data) {
+          this.isAuthenticated = true;
+          this.logger.info('Rally API authentication successful', {
+            baseUrl: this.baseUrl
+          });
+          return true;
+        } else {
+          throw new Error('Authentication response was invalid');
+        }
+      }
+    );
+
+    if (!result.success) {
+      this.isAuthenticated = false;
+      this.logger.error('Rally API authentication failed', {
+        error: result.error?.type,
+        message: result.error?.message,
+        attempts: result.metadata.attempts
+      });
+
+      throw result.error || new Error('Authentication failed');
+    }
+  }
+
+  /**
+   * Create Rally artifact with resilience protection
+   */
+  async create<T>(artifactType: string, data: T): Promise<RallyResponse<T>> {
+    this.ensureAuthenticated();
+
+    const result = await this.resilienceOrchestrator.executeOperation(
+      'create',
+      async () => {
+        const endpoint = this.getEndpointForArtifact(artifactType);
+        const payload = {
+          [artifactType]: data
+        };
+
+        const response = await this.httpClient.post(endpoint, payload);
+        return this.validateRallyResponse<T>(response.data);
+      }
+    );
+
+    if (!result.success) {
+      this.logger.error(`Failed to create ${artifactType}`, {
+        error: result.error?.type,
+        attempts: result.metadata.attempts,
+        usedFallback: result.metadata.usedFallback
+      });
+
+      throw result.error || new Error(`Failed to create ${artifactType}`);
+    }
+
+    this.logger.info(`Successfully created ${artifactType}`, {
+      attempts: result.metadata.attempts,
+      duration: result.metadata.totalDuration
+    });
+
+    return result.result!;
+  }
+
+  /**
+   * Get Rally artifact with resilience protection
+   */
+  async get<T>(artifactType: string, objectId: string): Promise<RallyResponse<T>> {
+    this.ensureAuthenticated();
+
+    const cacheKey = `${artifactType}_${objectId}`;
+
+    const result = await this.resilienceOrchestrator.executeOperation(
+      'get',
+      async () => {
+        const endpoint = this.getEndpointForArtifact(artifactType);
+        const response = await this.httpClient.get(`${endpoint}/${objectId}`);
+        const rallyResponse = this.validateRallyResponse<T>(response.data);
+
+        // Cache successful result for fallback
+        this.cacheResponse(cacheKey, rallyResponse);
+
+        return rallyResponse;
+      }
+    );
+
+    if (!result.success) {
+      this.logger.error(`Failed to get ${artifactType} ${objectId}`, {
+        error: result.error?.type,
+        attempts: result.metadata.attempts,
+        usedFallback: result.metadata.usedFallback
+      });
+
+      // If fallback was used, it might have returned cached data
+      if (result.metadata.usedFallback) {
+        const cachedData = this.getCachedResponse<T>(cacheKey);
+        if (cachedData) {
+          this.logger.info(`Returning cached data for ${artifactType} ${objectId}`);
+          return cachedData;
+        }
+      }
+
+      throw result.error || new Error(`Failed to get ${artifactType} with ID ${objectId}`);
+    }
+
+    return result.result!;
+  }
+
+  /**
+   * Update Rally artifact with resilience protection
+   */
+  async update<T>(artifactType: string, objectId: string, data: Partial<T>): Promise<RallyResponse<T>> {
+    this.ensureAuthenticated();
+
+    const result = await this.resilienceOrchestrator.executeOperation(
+      'update',
+      async () => {
+        const endpoint = this.getEndpointForArtifact(artifactType);
+        const payload = {
+          [artifactType]: data
+        };
+
+        const response = await this.httpClient.post(`${endpoint}/${objectId}`, payload);
+        return this.validateRallyResponse<T>(response.data);
+      }
+    );
+
+    if (!result.success) {
+      this.logger.error(`Failed to update ${artifactType} ${objectId}`, {
+        error: result.error?.type,
+        attempts: result.metadata.attempts,
+        usedFallback: result.metadata.usedFallback
+      });
+
+      throw result.error || new Error(`Failed to update ${artifactType} with ID ${objectId}`);
+    }
+
+    this.logger.info(`Successfully updated ${artifactType} ${objectId}`, {
+      attempts: result.metadata.attempts,
+      duration: result.metadata.totalDuration
+    });
+
+    return result.result!;
+  }
+
+  /**
+   * Query Rally artifacts with resilience protection
+   */
+  async query<T>(artifactType: string, query: RallyQuery): Promise<RallyResponse<T[]>> {
+    this.ensureAuthenticated();
+
+    const cacheKey = `query_${artifactType}_${JSON.stringify(query)}`;
+
+    const result = await this.resilienceOrchestrator.executeOperation(
+      'query',
+      async () => {
+        const endpoint = this.getEndpointForArtifact(artifactType);
+        const params = this.buildQueryParams(query);
+
+        const response = await this.httpClient.get(endpoint, { params });
+        const rallyResponse = this.validateRallyResponse<T[]>(response.data);
+
+        // Cache successful queries for fallback
+        this.cacheResponse(cacheKey, rallyResponse);
+
+        return rallyResponse;
+      }
+    );
+
+    if (!result.success) {
+      this.logger.error(`Failed to query ${artifactType}`, {
+        error: result.error?.type,
+        attempts: result.metadata.attempts,
+        usedFallback: result.metadata.usedFallback,
+        query
+      });
+
+      // If fallback was used, try to return cached data
+      if (result.metadata.usedFallback) {
+        const cachedData = this.getCachedResponse<T[]>(cacheKey);
+        if (cachedData) {
+          this.logger.info(`Returning cached query results for ${artifactType}`, {
+            query,
+            resultCount: cachedData.QueryResult.Results.length
+          });
+          return cachedData;
+        }
+      }
+
+      throw result.error || new Error(`Failed to query ${artifactType}`);
+    }
+
+    return result.result!;
+  }
+
+  /**
+   * Get system health status
+   */
+  async getHealthStatus(): Promise<any> {
+    return await this.resilienceOrchestrator.getSystemHealth();
+  }
+
+  /**
+   * Private helper methods
+   */
+  private getEndpointForArtifact(artifactType: string): string {
+    const artifactEndpoints: Record<string, string> = {
+      'UserStory': '/hierarchicalrequirement',
+      'HierarchicalRequirement': '/hierarchicalrequirement',
+      'Defect': '/defect',
+      'Task': '/task',
+      'Project': '/project',
+      'User': '/user',
+      'Workspace': '/workspace',
+      'Iteration': '/iteration'
+    };
+
+    const endpoint = artifactEndpoints[artifactType];
+    if (!endpoint) {
+      throw new Error(`Unknown artifact type: ${artifactType}`);
+    }
+
+    return endpoint;
+  }
+
+  private buildQueryParams(query: RallyQuery): Record<string, string> {
+    const params: Record<string, string> = {};
+
+    if (query['query']) {
+      params['query'] = query['query'];
+    }
+
+    if (query['fetch']) {
+      params['fetch'] = query['fetch'];
+    } else {
+      params['fetch'] = 'FormattedID,Name,Description,Owner,Project,CreationDate,LastUpdateDate';
+    }
+
+    if (query['order']) {
+      params['order'] = query['order'];
+    }
+
+    if (query['start'] !== undefined) {
+      params['start'] = query['start'].toString();
+    }
+
+    if (query['pagesize'] !== undefined) {
+      params['pagesize'] = Math.min(query['pagesize'], 200).toString();
+    } else {
+      params['pagesize'] = '20';
+    }
+
+    if (query['workspace']) {
+      params['workspace'] = query['workspace'];
+    }
+
+    if (query['project']) {
+      params['project'] = query['project'];
+    }
+
+    return params;
+  }
+
+  private validateRallyResponse<T>(data: unknown): RallyResponse<T> {
+    if (!data || typeof data !== 'object') {
+      throw new Error('Invalid Rally API response: missing data');
+    }
+
+    const response = data as any;
+    if (!response.QueryResult) {
+      throw new Error('Invalid Rally API response: missing QueryResult');
+    }
+
+    const queryResult = response.QueryResult;
+    if (!Array.isArray(queryResult.Errors)) {
+      queryResult.Errors = [];
+    }
+
+    if (!Array.isArray(queryResult.Warnings)) {
+      queryResult.Warnings = [];
+    }
+
+    if (!Array.isArray(queryResult.Results)) {
+      queryResult.Results = [];
+    }
+
+    // Check for Rally API errors
+    if (queryResult.Errors.length > 0) {
+      throw new Error(`Rally API error: ${queryResult.Errors.join(', ')}`);
+    }
+
+    return response as RallyResponse<T>;
+  }
+
+  private ensureAuthenticated(): void {
+    if (!this.isAuthenticated) {
+      throw new Error('Rally client is not authenticated. Call authenticate() first.');
+    }
+  }
+
+  private cacheResponse<T>(key: string, response: RallyResponse<T>): void {
+    // In a real implementation, this would use the FallbackManager's cache
+    // For now, we'll use a simple in-memory cache simulation
+    const cache = (global as any).__rallyCache || new Map();
+    cache.set(key, {
+      data: response,
+      timestamp: Date.now(),
+      maxAge: 300000 // 5 minutes
+    });
+    (global as any).__rallyCache = cache;
+  }
+
+  private getCachedResponse<T>(key: string): RallyResponse<T> | null {
+    const cache = (global as any).__rallyCache;
+    if (!cache) return null;
+
+    const entry = cache.get(key);
+    if (!entry) return null;
+
+    const age = Date.now() - entry.timestamp;
+    if (age > entry.maxAge) {
+      cache.delete(key);
+      return null;
+    }
+
+    return entry.data;
+  }
+
+  /**
+   * Legacy compatibility methods
+   */
+  isAuthenticatedClient(): boolean {
+    return this.isAuthenticated;
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+}
